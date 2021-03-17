@@ -12,3 +12,4 @@ class AgendaItem(scrapy.Item):
     decisionBodyName = scrapy.Field()
 
     search_id = scrapy.Field()
+    email = scrapy.Field()

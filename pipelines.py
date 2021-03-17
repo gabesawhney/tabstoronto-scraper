@@ -12,7 +12,6 @@ from mysql.connector.constants import ClientFlag
 
 
 class TmmisSearcherPipeline:
-	table = 'searches'
 	configfile = configparser.ConfigParser()
 	configfile.read('mysql-config.ini')
 	conf = {
@@ -38,7 +37,6 @@ class TmmisSearcherPipeline:
 		#self.save(dict(item))
 		#print("Updating item in db ...")
 		self.update(dict(item))
-		self.sendemail(dict(item))
 		return item
 	
 	def close_spider(self, spider):
@@ -55,38 +53,33 @@ class TmmisSearcherPipeline:
 			else:
 				print(err)
 	
-	
-	def save(self, row): #DEMO CODE NOT WORKING
+	def update(self, row): 
 		cursor = self.cnx.cursor()
-		create_query = ("INSERT INTO " + self.table + 
-			"(quote, author) "
-			"VALUES (%(quote)s, %(author)s)")
-
-		# Insert new row
+		rec = row
+		#print("REC:")
+		#print(rec)
+		create_query = ("UPDATE searches" +
+			" SET lastran = NOW() WHERE id='" + str(rec['search_id']) + "'")
 		cursor.execute(create_query, row)
+		lastRecordId = cursor.rowcount
+		self.cnx.commit()
+		cursor.close()
+
+		cursor = self.cnx.cursor()
+		create_query = ("INSERT INTO notifications " +
+			"(id, title, reference, meetingdate, decisionBodyName, email) "
+			"VALUES (%s, %s, %s, %s, %s, %s) ON DUPLICATE KEY UPDATE id=id")
+
+		#print("Create_query:")
+		#print(create_query)
+		# Insert new row
+		data = (rec['search_id'], rec['agendaItemTitle'], rec['reference'], rec['meetingDate'], rec['decisionBodyName'], rec['email'])
+		cursor.execute(create_query, data)
 		lastRecordId = cursor.lastrowid
 
 		# Make sure data is committed to the database
 		self.cnx.commit()
 		cursor.close()
-		if (format(lastRecordId)!="0"):
-			print("Item saved with ID: {}" . format(lastRecordId)) 
-
-	def update(self, row): 
-		cursor = self.cnx.cursor()
-		create_query = ("UPDATE " + self.table + 
-			" SET lastran = NOW() WHERE id='" + str(row['search_id']) + "'")
-		cursor.execute(create_query, row)
-		lastRecordId = cursor.rowcount
-
-		self.cnx.commit()
-		cursor.close()
-		if (format(lastRecordId)!="0"):
-			print("********-----> Item updated with ID: {}" . format(lastRecordId)) 
-
-	def sendemail(self, row):
-		print("********-----> sending email: " + str(row['reference']))
-
 
 	def mysql_close(self):
 		self.cnx.close()
