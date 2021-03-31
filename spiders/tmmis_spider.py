@@ -10,6 +10,7 @@ from scrapy import signals
 from pydispatch import dispatcher
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
+from urllib.parse import quote
 
 configfile = configparser.ConfigParser()
 configfile.read('mysql-config.ini')
@@ -25,6 +26,20 @@ conf = {
 		'raise_on_warnings': True
 		
 }
+
+def get_searchphrase(id):
+		conn = mysql.connector.connect(**conf)
+		cursor = conn.cursor()
+		print("****" + str(id))
+		if str(id) != "":
+			cursor.execute('SELECT searchphrase FROM searches WHERE id = ' + str(id) + ';')
+			#rows = cursor.fetchall()
+			for row in cursor:
+				if row:
+					#print(row[0])
+					return row[0]
+		else:
+			print("PROBLEM AAA")
 
 class TmmisSearchSpider(scrapy.Spider):
 
@@ -43,44 +58,57 @@ class TmmisSearchSpider(scrapy.Spider):
 		#rows = cursor.fetchall()
 		emailtext = ""
 		lastid = ""
+		lastemail = ""
 		for row in cursor:
 			if row:
-				if lastid == "" or row['id'] == lastid:
-					emailtext += row['title'] + " " + row['reference'] + " " + row['meetingdate'] + row['decisionBodyName']
-					
+				if emailtext == "":
+					emailtext = "Your search for " + get_searchphrase(row['id']) + " returned the following new results:\n\n"
+				if lastid == "":
+					#this is the first record; add to the email we're preparing
+					emailtext += row['title'] + " " + row['reference'] + " " + row['meetingdate'] + " " + row['decisionBodyName'] + "\n"
 					lastid = row['id']
+					lastemail = row['email']
+				elif row['id'] == lastid:
+					#this is a subsequent record; add it to the email we're preparing
+					emailtext += row['title'] + " " + row['reference'] + " " + row['meetingdate'] + " " + row['decisionBodyName'] + "\n"
+					lastid = row['id']
+					lastemail = row['email']
 				else:
-					#send that last email
-					print("send an email to " + row['email'] + "with the text:")
-					print(emailtext)
-
-					#INSERT SENDING CODE HERE
+					#this is part of a separate notification, so first let's send the email for the previous one
+					emailtext += "To permanently stop receiving notifications for this search, click here: http://pwd.ca/tabs/unsubscribe.php?e=" + quote(row['email']) + "&i=" + str(lastid)
+					self.send_email(row['email'],"Tabs Toronto notification: "+get_searchphrase(lastid),emailtext)
 
 					cursor2 = conn2.cursor()
 					print('ABOUT TO RUN: ' + 'UPDATE notifications SET emailsent=1 WHERE id = "' + str(row['id']) + '";')
 					cursor2.execute('UPDATE notifications SET emailsent=1 WHERE id = "' + str(row['id']) + '";')
+					conn2.commit()
 
-					#prepare the next email
-					emailtext = row['title'] + " " + row['reference'] + " " + row['meetingdate'] + row['decisionBodyName']
+					#start preparing the next email
+					emailtext = "Your search for " + get_searchphrase(row['id']) + " returned the following new results:\n\n"
+					emailtext += row['title'] + " " + row['reference'] + " " + row['meetingdate'] + " " + row['decisionBodyName'] + "\n"
 					lastid = row['id']
+					lastemail = row['email']
 
-		#send the final email
-		print("send an email to " + row['email'] + " with the text: ")
-		print(emailtext)
-#		self.send_email(to="gabe@pwd.ca",subject="blah",content=emailtext)
-		self.send_email(subject="blah",content=emailtext)
+		if lastid == "":
+			#there are no emails to send
+			lastid = ""
+		else:
+			#send the final email
+			emailtext += "To permanently stop receiving notifications for this search, click here: http://pwd.ca/tabs/unsubscribe.php?e=" + quote(lastemail) + "&i=" + str(lastid)
+			print("zzz")
+			self.send_email(lastemail,"Tabs Toronto notification: "+get_searchphrase(lastid),emailtext)
 
-		cursor2 = conn2.cursor()
-		print('ABOUT TO RUN: ' + 'UPDATE notifications SET emailsent=1 WHERE id = "' + str(row['id']) + '";')
-		cursor2.execute('UPDATE notifications SET emailsent=1 WHERE id = "' + str(row['id']) + '";')
+			cursor2 = conn2.cursor()
+			print('ABOUT TO RUN: ' + 'UPDATE notifications SET emailsent=1 WHERE id = "' + str(row['id']) + '";')
+			cursor2.execute('UPDATE notifications SET emailsent=1 WHERE id = "' + str(row['id']) + '";')
+			conn2.commit()
 
-
-	def send_email(to,subject,content):
+	def send_email(self,to,subject,content):
 		message = Mail(
     		from_email='gabe@pwd.ca',
 #   			to_emails=to,
-   			to_emails='gabe@pwd.ca',
-    		subject='Sending with Twilio SendGrid is Fun',
+   			to_emails=to,
+    		subject=subject,
     		html_content=content)
 		try:
 			sg = SendGridAPIClient(os.environ.get('SENDGRID_API_KEY'))
@@ -123,3 +151,5 @@ class TmmisSearchSpider(scrapy.Spider):
 			item['search_id'] = response.meta['id']
 			item['email'] = response.meta['email']
 			yield item
+
+	
