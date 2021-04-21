@@ -7,17 +7,7 @@ A tool and service to monitor agenda items of interest for upcoming City of Toro
 - A scraper runs nightly, conducting searches and sending emails if new agenda items are found.
 
 ## Setup
-- Create tmmis_searcher/mysql-config.ini:
-```python
-[DEFAULT]
-user = #mysql-username
-password = #mysql-password
-host = #mysql-host
-database = #mysq-databasename
-```
-- Put ssl certs for accessing mysql db in tmmis_searcher/ssl (client-cert.pem, client-key.pem, server-ca.pem)
-- To run the scaper, use: scrapy crawl tmmis-search
-
+(to come)
 
 ## Inspiration
 
