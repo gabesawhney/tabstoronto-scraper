@@ -1,7 +1,8 @@
 CREATE TABLE `searches` (
   `id` mediumint(9) NOT NULL AUTO_INCREMENT,
   `email` varchar(255) DEFAULT NULL,
-  `lastran` datetime DEFAULT NULL,
+  `created` datetime DEFAULT NULL,
+  `validated` datetime DEFAULT NULL,
   `searchphrase` varchar(255) DEFAULT NULL,
   `emailvalidated` tinyint(1) DEFAULT NULL,
   PRIMARY KEY (`id`)

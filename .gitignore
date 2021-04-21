@@ -138,3 +138,6 @@ mysql-config.ini
 ssl/
 *.pem
 
+#scrapy config which includes sensitive mysql and sendgrid info
+settings.py
+
