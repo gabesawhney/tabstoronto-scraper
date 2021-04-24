@@ -17,7 +17,7 @@ It was later lovingly incubated by the now defunct [Toronto Public Space Initiat
 
 <!-- Links -->
    [tabs-archive]: http://web.archive.org/web/20201130071344/http://tabstoronto.com/
-   [Christian Muise]: https://twitter.com/cjmuise
+   [Christian Muise]: http://haz.ca
    [Jayme Turney]: https://www.linkedin.com/in/jaymeturney/
    [rhokto]: https://twitter.com/RHOKTO
    [tpsi]: http://web.archive.org/web/20181223010237/http://publicspaces.ca/
