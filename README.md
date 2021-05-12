@@ -1,5 +1,5 @@
 # tabstoronto-scraper
-A tool and service to monitor agenda items of interest for upcoming City of Toronto council/committee meetings. 
+A tool and service to monitor agenda items of interest for upcoming City of Toronto council/committee meetings. http://pwd.ca/tabs
 
 
 ## How it works
