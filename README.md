@@ -1,5 +1,5 @@
 # tabstoronto-scraper
-A tool and service to monitor agenda items of interest for upcoming City of Toronto council/committee meetings. 
+A tool and service to monitor agenda items of interest for upcoming City of Toronto council/committee meetings. http://pwd.ca/tabs
 
 
 ## How it works
@@ -7,17 +7,7 @@ A tool and service to monitor agenda items of interest for upcoming City of Toro
 - A scraper runs nightly, conducting searches and sending emails if new agenda items are found.
 
 ## Setup
-- Create tmmis_searcher/mysql-config.ini:
-```python
-[DEFAULT]
-user = #mysql-username
-password = #mysql-password
-host = #mysql-host
-database = #mysq-databasename
-```
-- Put ssl certs for accessing mysql db in tmmis_searcher/ssl (client-cert.pem, client-key.pem, server-ca.pem)
-- To run the scaper, use: scrapy crawl tmmis-search
-
+(to come)
 
 ## Inspiration
 
@@ -27,7 +17,7 @@ It was later lovingly incubated by the now defunct [Toronto Public Space Initiat
 
 <!-- Links -->
    [tabs-archive]: http://web.archive.org/web/20201130071344/http://tabstoronto.com/
-   [Christian Muise]: https://twitter.com/cjmuise
+   [Christian Muise]: http://haz.ca
    [Jayme Turney]: https://www.linkedin.com/in/jaymeturney/
    [rhokto]: https://twitter.com/RHOKTO
    [tpsi]: http://web.archive.org/web/20181223010237/http://publicspaces.ca/
