@@ -65,7 +65,7 @@ class TmmisSearcherPipeline:
 		data = (rec['search_id'], rec['agendaItemTitle'], rec['reference'], rec['meetingDate'], rec['decisionBodyName'], rec['email'])
 		cursor.execute(create_query, data)
 		if tabsdebug and cursor.rowcount > 0:
-			logging.info('JUST RAN ('+cursor.rowcount+'): ' + cursor.statement)
+			logging.info('JUST RAN ('+str(cursor.rowcount)+'): ' + cursor.statement)
 		lastRecordId = cursor.lastrowid
 
 		# Make sure data is committed to the database
