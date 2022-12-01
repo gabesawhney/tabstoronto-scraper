@@ -162,8 +162,8 @@ class TmmisSearchSpider(scrapy.Spider):
 			if row:
 				fromDate = datetime.date.today() #this will be the 'fromDate' in the search
 				toDate = fromDate + datetime.timedelta(days=100) #tihs will be the 'toDate' in the search
-
-				thisurl = 'http://app.toronto.ca/tmmis/findAgendaItem.do?function=doSearch&termId=7&itemsPerPage=100&fromDate=' + fromDate.strftime("%Y-%m-%d") + '&toDate=' + toDate.strftime("%Y-%m-%d") + '&word=' + row[0]
+				termId = '8' #8 = 2022-2026. This needs to change every council term, every 4 years!
+				thisurl = 'http://app.toronto.ca/tmmis/findAgendaItem.do?function=doSearch&termId=' + termId + '&itemsPerPage=100&fromDate=' + fromDate.strftime("%Y-%m-%d") + '&toDate=' + toDate.strftime("%Y-%m-%d") + '&word=' + row[0]
 				yield scrapy.Request(thisurl, self.parse, meta=dict(start_url=thisurl,id=row[1],email=row[2]))
 
 		cursor.close()
