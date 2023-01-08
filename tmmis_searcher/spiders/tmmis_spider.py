@@ -124,7 +124,7 @@ class TmmisSearchSpider(scrapy.Spider):
 				lg.debug("D2: "+str(row['id']))
 				#start preparing the next email
 				emailtext = "<b>Your search for " + self.get_searchphrase(row['id']) + " returned the following new results:</b><br><br>"
-				emailtext += row['title'] + ' <a href="https://secure.toronto.ca/council/agenda-item.do	?item=' + row['reference'] + '">' + row['reference'] + '</a> ' + row['decisionBodyName'] + " " + row['meetingdate'] + "<br><br>"
+				emailtext += row['title'] + ' <a href="https://secure.toronto.ca/council/agenda-item.do?item=' + row['reference'] + '">' + row['reference'] + '</a> ' + row['decisionBodyName'] + " " + row['meetingdate'] + "<br><br>"
 				lastid = row['id']
 				lastemail = row['email']
 
