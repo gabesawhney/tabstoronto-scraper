@@ -18,8 +18,9 @@ from scrapy.http.cookies import CookieJar
 from datetime import tzinfo
 
 sendemails = 1
-tempmessage = '<br>' + "<b>NOTE: </b> On December 20th 2022, the City of Toronto launched an updated version of TMMIS, called 'www.toronto.ca/council'. Due to this change, Tabs Toronto needed to be updated, and between then and January 8th 2023, notifications were not sent. <br><br>You may receive a large volume of notifications on or after January 8th, as the Tabs system catches up. You may also receive a larger volume of notifications on an ongoing basis, because the 'new TMMIS' also returns agenda items where the search terms match <I>within documents attached to the item</I>. As always, if you find that you're receiving more notifications than you'd like, you can delete your search using the link below, and create a new, more specific search at <a href='http://pwd.ca/tabs'>pwd.ca/tabs</a>." + '<br>' # string beginning and ending with <br> ,  or ''
-tempfromdate = '2022-12-19' # 'YYYY-MM-DD' or ''
+#tempmessage = '<br>' + "<b>NOTE: </b> On December 20th 2022, the City of Toronto launched an updated version of TMMIS, called 'www.toronto.ca/council'. Due to this change, Tabs Toronto needed to be updated, and between then and January 8th 2023, notifications were not sent. <br><br>You may receive a large volume of notifications on or after January 8th, as the Tabs system catches up. You may also receive a larger volume of notifications on an ongoing basis, because the 'new TMMIS' also returns agenda items where the search terms match <I>within documents attached to the item</I>. As always, if you find that you're receiving more notifications than you'd like, you can delete your search using the link below, and create a new, more specific search at <a href='http://pwd.ca/tabs'>pwd.ca/tabs</a>." + '<br>' # string beginning and ending with <br> ,  or ''
+tempmessage = ''
+tempfromdate = '' # 'YYYY-MM-DD' or ''
 
 lg = logging.getLogger()
 logging.basicConfig()
