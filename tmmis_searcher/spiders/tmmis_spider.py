@@ -16,6 +16,7 @@ from urllib.parse import quote
 from pprint import pformat
 from scrapy.http.cookies import CookieJar
 from datetime import tzinfo
+from curl_cffi import requests as curl_requests
 
 sendemails = 1
 #tempmessage = '<br>' + "<b>NOTE: </b> On December 20th 2022, the City of Toronto launched an updated version of TMMIS, called 'www.toronto.ca/council'. Due to this change, Tabs Toronto needed to be updated, and between then and January 8th 2023, notifications were not sent. <br><br>You may receive a large volume of notifications on or after January 8th, as the Tabs system catches up. You may also receive a larger volume of notifications on an ongoing basis, because the 'new TMMIS' also returns agenda items where the search terms match <I>within documents attached to the item</I>. As always, if you find that you're receiving more notifications than you'd like, you can delete your search using the link below, and create a new, more specific search at <a href='http://pwd.ca/tabs'>pwd.ca/tabs</a>." + '<br>' # string beginning and ending with <br> ,  or ''
@@ -39,6 +40,25 @@ class TmmisSearchSpider(scrapy.Spider):
 
 	def __init__(self):
 		dispatcher.connect(self.spider_closed, signals.spider_closed)
+
+	def get_csrf_tokens(self):
+		"""
+		Use curl_cffi to get CSRF tokens with browser TLS fingerprinting.
+		This bypasses the blocking that occurs with standard HTTP clients.
+		Returns a tuple of (cookies_dict, xsrf_token)
+		"""
+		session = curl_requests.Session()
+		
+		# Visit main page to establish session, then get CSRF token
+		session.get('https://secure.toronto.ca/council/', impersonate="chrome120")
+		session.get('https://secure.toronto.ca/council/api/csrf.json', impersonate="chrome120").raise_for_status()
+		
+		cookies_dict = dict(session.cookies)
+		xsrf_token = cookies_dict.get('XSRF-TOKEN')
+		if not xsrf_token:
+			raise Exception(f'XSRF-TOKEN not found. Available cookies: {list(cookies_dict.keys())}')
+		
+		return cookies_dict, xsrf_token
 
 	def get_searchphrase(self,id):
 		#given the id of a record in the searches table, returns the associated searchphrase
@@ -168,74 +188,75 @@ class TmmisSearchSpider(scrapy.Spider):
 			print(e.message)
 
 	def start_requests(self):
-		mycookies = ""
-		#first request
-		thisurl = 'https://secure.toronto.ca/council/'
-		yield scrapy.Request(thisurl, self.parse_first_requests, dont_filter=True, meta={'cookiejar': mycookies})
-
-		#second request
-		thisurl = 'https://secure.toronto.ca/council/api/csrf.json'
-		yield scrapy.Request(thisurl, self.parse_first_requests, method='GET', dont_filter=True, meta={'cookiejar': mycookies})
+		"""Get CSRF tokens using curl_cffi, then proceed with Scrapy requests."""
+		mycookies, xsrf_token = self.get_csrf_tokens()
+		yield scrapy.Request(
+			'https://secure.toronto.ca/council/',
+			self.parse_first_requests,
+			dont_filter=True,
+			meta={'cookies': mycookies, 'xsrf_token': xsrf_token}
+		)
 
 
 
 	def parse_first_requests(self, response):
 		global tempfromdate
 
-		if response.url == 'https://secure.toronto.ca/council/':
-			pass
-		else:
-			mycookies = {}
-			cookieJar = response.meta.setdefault('cookie_jar', CookieJar())
-			cookieJar.extract_cookies(response, response.request)
-			for cooki in cookieJar: 
-				mycookies[cooki.name] = cooki.value
-
-			if mycookies['XSRF-TOKEN']:
-				pass
-			else:
-				raise Exception('XSRF value is missing')
+		# Get cookies and XSRF token from meta (set by start_requests using curl_cffi)
+		mycookies = response.meta['cookies']
+		xsrf_token = response.meta['xsrf_token']
 		
-			if self.settings.get('MYSQL_USER'):
-				conf = {
-					'user': self.settings.get('MYSQL_USER'),
-					'password': self.settings.get('MYSQL_PASSWORD'),
-					'host': self.settings.get('MYSQL_HOST'),
-					'database': self.settings.get('MYSQL_DATABASE'),
-				 	'raise_on_warnings': True
-				}
-			else:
-				raise Exception('mysql config failure')	
-
-			conn = mysql.connector.connect(**conf)
-			cursor = conn.cursor()
-			cursor.execute('SELECT searchphrase,id,email FROM `searches` WHERE emailvalidated;')
-			rows = cursor.fetchall()
-
-			xsrftoken = ""
-			body = ""
-			headers = {
-	 			"Accept": "application/json, text/plain, */*", "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8", "Connection": "keep-alive", "Content-Type": "application/json", "Origin": "https://secure.toronto.ca", "Referer": "https://secure.toronto.ca/council/", "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-origin", "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36", "sec-ch-ua": "\"Not?A_Brand\";v=\"8\", \"Chromium\";v=\"108\", \"Google Chrome\";v=\"108\"", "sec-ch-ua-mobile": "?0", "sec-ch-ua-platform": "\"macOS\"",
-	    			"X-XSRF-TOKEN": mycookies['XSRF-TOKEN'],
+		if self.settings.get('MYSQL_USER'):
+			conf = {
+				'user': self.settings.get('MYSQL_USER'),
+				'password': self.settings.get('MYSQL_PASSWORD'),
+				'host': self.settings.get('MYSQL_HOST'),
+				'database': self.settings.get('MYSQL_DATABASE'),
+			 	'raise_on_warnings': True
 			}
+		else:
+			raise Exception('mysql config failure')	
 
-			lg.debug("ROWS: "+pformat(rows))
-			for row in rows:
-				if row:
-					if tempfromdate != '':
-						fromDate = datetime.datetime.strptime(tempfromdate,'%Y-%m-%d')
-					else:
-						fromDate = datetime.datetime.today()
-					fromDate = fromDate.replace(hour=0, minute=0, second=0, microsecond=0)
-					fromDate = fromDate.astimezone(datetime.timezone.utc)
-					lg.debug("FROMDATE: "+pformat(fromDate))
-					
-					thisurl = 'https://secure.toronto.ca/council/api/multiple/agenda-items.json?pageNumber=0&pageSize=50&sortOrder=meetingDate%20desc,referenceSort'
-					body = '{"includeTitle":true,"includeSummary":true,"includeRecommendations":true,"includeDecisions":true,"meetingFromDate":"' + fromDate.strftime("%Y-%m-%dT%H:%M:%S.%fZ") + '","meetingToDate":null,"word":"'+ row[0] +'","includeAttachments":true}'
+		conn = mysql.connector.connect(**conf)
+		cursor = conn.cursor()
+		cursor.execute('SELECT searchphrase,id,email FROM `searches` WHERE emailvalidated;')
+		rows = cursor.fetchall()
 
-					yield scrapy.Request(thisurl, self.parse, method='POST', dont_filter=True, headers=headers, body=body, cookies=mycookies, meta=dict(id=row[1],email=row[2]))
+		# Update headers with more current Chrome version
+		headers = {
+			"Accept": "application/json, text/plain, */*",
+			"Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
+			"Connection": "keep-alive",
+			"Content-Type": "application/json",
+			"Origin": "https://secure.toronto.ca",
+			"Referer": "https://secure.toronto.ca/council/",
+			"Sec-Fetch-Dest": "empty",
+			"Sec-Fetch-Mode": "cors",
+			"Sec-Fetch-Site": "same-origin",
+			"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+			"sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+			"sec-ch-ua-mobile": "?0",
+			"sec-ch-ua-platform": '"macOS"',
+			"X-XSRF-TOKEN": xsrf_token,
+		}
 
-			cursor.close()
+		lg.debug("ROWS: "+pformat(rows))
+		for row in rows:
+			if row:
+				if tempfromdate != '':
+					fromDate = datetime.datetime.strptime(tempfromdate,'%Y-%m-%d')
+				else:
+					fromDate = datetime.datetime.today()
+				fromDate = fromDate.replace(hour=0, minute=0, second=0, microsecond=0)
+				fromDate = fromDate.astimezone(datetime.timezone.utc)
+				lg.debug("FROMDATE: "+pformat(fromDate))
+				
+				thisurl = 'https://secure.toronto.ca/council/api/multiple/agenda-items.json?pageNumber=0&pageSize=50&sortOrder=meetingDate%20desc,referenceSort'
+				body = '{"includeTitle":true,"includeSummary":true,"includeRecommendations":true,"includeDecisions":true,"meetingFromDate":"' + fromDate.strftime("%Y-%m-%dT%H:%M:%S.%fZ") + '","meetingToDate":null,"word":"'+ row[0] +'","includeAttachments":true}'
+
+				yield scrapy.Request(thisurl, self.parse, method='POST', dont_filter=True, headers=headers, body=body, cookies=mycookies, meta=dict(id=row[1],email=row[2]))
+
+		cursor.close()
 
 
 	def parse(self, response):
