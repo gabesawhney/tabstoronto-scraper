@@ -12,12 +12,17 @@ from scrapy import signals
 from pydispatch import dispatcher
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
+from scrapy.mail import MailSender #for gmail
 from urllib.parse import quote
 from pprint import pformat
 from scrapy.http.cookies import CookieJar
 from datetime import tzinfo
 
+testemail = 0 ########
 sendemails = 1
+updatemysql = 0
+debugemaillimit = 1
+emailchannel = 'gmail'
 #tempmessage = '<br>' + "<b>NOTE: </b> On December 20th 2022, the City of Toronto launched an updated version of TMMIS, called 'www.toronto.ca/council'. Due to this change, Tabs Toronto needed to be updated, and between then and January 8th 2023, notifications were not sent. <br><br>You may receive a large volume of notifications on or after January 8th, as the Tabs system catches up. You may also receive a larger volume of notifications on an ongoing basis, because the 'new TMMIS' also returns agenda items where the search terms match <I>within documents attached to the item</I>. As always, if you find that you're receiving more notifications than you'd like, you can delete your search using the link below, and create a new, more specific search at <a href='http://pwd.ca/tabs'>pwd.ca/tabs</a>." + '<br>' # string beginning and ending with <br> ,  or ''
 tempmessage = ''
 tempfromdate = '' # 'YYYY-MM-DD' or ''
@@ -31,6 +36,7 @@ lg.info("TEMPFROMDATE: "+tempfromdate)
 
 
 class TmmisSearchSpider(scrapy.Spider):
+	#handle_httpstatus_list = [400]
 
 	name = 'tmmis-search'
 	allowed_domains = ['toronto.ca']
@@ -67,6 +73,12 @@ class TmmisSearchSpider(scrapy.Spider):
 		global sendemails
 		global tempmessage
 		global lg
+
+		global testemail
+
+		if testemail:
+			self.send_email("gabe@pwd.ca","Tabs Toronto Test","test")
+			lg.info("@@@@@@@@@@@@@@@@@@@@@ sent email to GABE for TEST")
 
 		if self.settings.get('MYSQL_USER'):
 			conf = {
@@ -119,8 +131,9 @@ class TmmisSearchSpider(scrapy.Spider):
 
 				cursor2 = conn2.cursor()
 				lg.info('ABOUT TO RUN: ' + 'UPDATE notifications SET emailsent=1 WHERE id = "' + str(lastid) + '";')
-				cursor2.execute('UPDATE notifications SET emailsent=1 WHERE id = "' + str(lastid) + '";')
-				conn2.commit()
+				if updatedb:
+					cursor2.execute('UPDATE notifications SET emailsent=1 WHERE id = "' + str(lastid) + '";')
+					conn2.commit()
 
 				lg.debug("D2: "+str(row['id']))
 				#start preparing the next email
@@ -147,40 +160,54 @@ class TmmisSearchSpider(scrapy.Spider):
 
 			cursor2 = conn2.cursor()
 			lg.info('ABOUT TO RUN: ' + 'UPDATE notifications SET emailsent=1 WHERE id = "' + str(lastid) + '";')
-			cursor2.execute('UPDATE notifications SET emailsent=1 WHERE id = "' + str(lastid) + '";')
-			conn2.commit()
+			if updatedb:
+				cursor2.execute('UPDATE notifications SET emailsent=1 WHERE id = "' + str(lastid) + '";')
+				conn2.commit()
 		lg.info("--------- finished notifications/emails")
 
-	def send_email(self,to,subject,content):
-		message = Mail(
-    		from_email='tabstoronto@pwd.ca',
-   			to_emails=to,
-    		subject=subject,
-    		html_content=content)
-		try:
-			if self.settings.get('SENDGRID_API_KEY'):	
-				sg = SendGridAPIClient(self.settings.get('SENDGRID_API_KEY'))
-			else:
-				raise Exception("sendgrid api key error")
+	async def send_email(self,to,subject,content):
+		global emailchannel
 
-			response = sg.send(message)
-		except Exception as e:
-			print(e.message)
+		if emailchannel == "sendgrid":
+			message = Mail(
+	    		from_email='tabstoronto@pwd.ca',
+	   			to_emails=to,
+	    		subject=subject,
+	    		html_content=content)
+			try:
+				if self.settings.get('SENDGRID_API_KEY'):	
+					sg = SendGridAPIClient(self.settings.get('SENDGRID_API_KEY'))
+				else:
+					raise Exception("sendgrid api key error")
+	
+				response = sg.send(message)
+			except Exception as e:
+				print(e.message)
+		else:
+			lg.info(" @@@@@ gmail")
+			#we assume emailchannel = "gmail"
+			mailer = MailSender(mailfrom='tabstoronto@pwd.ca',
+				smtpuser=self.settings.get('GMAIL_USERNAME'),smtphost="smtp.gmail.com", 
+				smtpport=587, smtppass=self.settings.get('GMAIL_PASSWORD'), smtptls=1)
+			await mailer.send(to=to, subject=subject, body=content)
+			lg.debug(" @@@@@ email sent, gmail")
 
-	def start_requests(self):
+#	def start_requests(self):
+	async def start(self):
 		mycookies = ""
 		#first request
 		thisurl = 'https://secure.toronto.ca/council/'
-		yield scrapy.Request(thisurl, self.parse_first_requests, dont_filter=True, meta={'cookiejar': mycookies})
+		yield scrapy.Request(thisurl, callback=self.parse_first_requests, errback=self.errback, dont_filter=True, meta={'cookiejar': mycookies})
 
 		#second request
 		thisurl = 'https://secure.toronto.ca/council/api/csrf.json'
-		yield scrapy.Request(thisurl, self.parse_first_requests, method='GET', dont_filter=True, meta={'cookiejar': mycookies})
+		yield scrapy.Request(thisurl, callback=self.parse_first_requests, errback=self.errback, method='GET', dont_filter=True, meta={'cookiejar': mycookies})
 
 
 
 	def parse_first_requests(self, response):
 		global tempfromdate
+		global debugemaillimit
 
 		if response.url == 'https://secure.toronto.ca/council/':
 			pass
@@ -209,7 +236,10 @@ class TmmisSearchSpider(scrapy.Spider):
 
 			conn = mysql.connector.connect(**conf)
 			cursor = conn.cursor()
-			cursor.execute('SELECT searchphrase,id,email FROM `searches` WHERE emailvalidated;')
+			if debugemaillimit:
+				cursor.execute('SELECT searchphrase,id,email FROM `searches` WHERE emailvalidated AND email="gabe@pwd.ca";')
+			else:
+				cursor.execute('SELECT searchphrase,id,email FROM `searches` WHERE emailvalidated;')
 			rows = cursor.fetchall()
 
 			xsrftoken = ""
@@ -228,12 +258,14 @@ class TmmisSearchSpider(scrapy.Spider):
 						fromDate = datetime.datetime.today()
 					fromDate = fromDate.replace(hour=0, minute=0, second=0, microsecond=0)
 					fromDate = fromDate.astimezone(datetime.timezone.utc)
-					lg.debug("FROMDATE: "+pformat(fromDate))
+					#lg.debug("FROMDATE: "+pformat(fromDate))
 					
 					thisurl = 'https://secure.toronto.ca/council/api/multiple/agenda-items.json?pageNumber=0&pageSize=50&sortOrder=meetingDate%20desc,referenceSort'
-					body = '{"includeTitle":true,"includeSummary":true,"includeRecommendations":true,"includeDecisions":true,"meetingFromDate":"' + fromDate.strftime("%Y-%m-%dT%H:%M:%S.%fZ") + '","meetingToDate":null,"word":"'+ row[0] +'","includeAttachments":true}'
+					body = '{"includeTitle":true,"includeSummary":true,"includeRecommendations":true,"includeDecisions":true,"decisionBodyId":null,"meetingFromDate":"' + fromDate.strftime("%Y-%m-%dT%H:%M:%S.%fZ") + '","meetingToDate":null,"word":"'+ row[0] +'","includeAttachments":true}'
+					#### GABE TESTING
+					#lg.debug("thisurl: "+thisurl+"     --- BODY:"+pformat(body));
 
-					yield scrapy.Request(thisurl, self.parse, method='POST', dont_filter=True, headers=headers, body=body, cookies=mycookies, meta=dict(id=row[1],email=row[2]))
+					yield scrapy.Request(thisurl, callback=self.parse, errback=self.errback, method='POST', dont_filter=True, headers=headers, body=body, cookies=mycookies, meta=dict(id=row[1],email=row[2]))
 
 			cursor.close()
 
@@ -242,17 +274,25 @@ class TmmisSearchSpider(scrapy.Spider):
 		global lg
 		jsonresponse = json.loads(response.body)
 		#lg.debug("RESPONSE: "+pformat(jsonresponse))
-		for r in jsonresponse["Records"]:
-			item = AgendaItem()
-			item['meetingDate'] = datetime.datetime.utcfromtimestamp(r['meetingDate']/1000).strftime("%Y-%m-%d")
-			item['reference'] = r['reference']
-			item['agendaItemTitle'] = r['agendaItemTitle']
-			item['decisionBodyName'] = r['decisionBodyName']
-			item['search_id'] = response.meta['id']
-			item['email'] = response.meta['email']
-			lg.debug("ITEM: " + pformat(item))
-			yield item
 
+		if response.status == 200:
 
+			for r in jsonresponse["Records"]:
+				item = AgendaItem()
+				item['meetingDate'] = datetime.datetime.utcfromtimestamp(r['meetingDate']/1000).strftime("%Y-%m-%d")
+				item['reference'] = r['reference']
+				item['agendaItemTitle'] = r['agendaItemTitle']
+				item['decisionBodyName'] = r['decisionBodyName']
+				item['search_id'] = response.meta['id']
+				item['email'] = response.meta['email']
+				#lg.debug("ITEM: " + pformat(item))
+				yield item
+		else:
+			lg.debug("FAIL RESPONSE: "+pformat(jsonresponse))
+
+	def errback(self, failure):
+		global lg
+		# log all failures
+		lg.debug("FAILURE:" + pformat(failure))
 
 	
