@@ -12,14 +12,20 @@ from scrapy import signals
 from pydispatch import dispatcher
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
+from scrapy.mail import MailSender #for gmail
 from urllib.parse import quote
 from pprint import pformat
 from scrapy.http.cookies import CookieJar
 from datetime import tzinfo
+from curl_cffi import requests as curl_requests
 
+testemail = 0 ########
 sendemails = 1
-#tempmessage = '<br>' + "<b>NOTE: </b> On December 20th 2022, the City of Toronto launched an updated version of TMMIS, called 'www.toronto.ca/council'. Due to this change, Tabs Toronto needed to be updated, and between then and January 8th 2023, notifications were not sent. <br><br>You may receive a large volume of notifications on or after January 8th, as the Tabs system catches up. You may also receive a larger volume of notifications on an ongoing basis, because the 'new TMMIS' also returns agenda items where the search terms match <I>within documents attached to the item</I>. As always, if you find that you're receiving more notifications than you'd like, you can delete your search using the link below, and create a new, more specific search at <a href='http://pwd.ca/tabs'>pwd.ca/tabs</a>." + '<br>' # string beginning and ending with <br> ,  or ''
-tempmessage = ''
+updatedb = 1
+debugemaillimit = 0 ## this makes it so it only processes searches created by gabe@pwd.ca
+emailchannel = 'sendgrid'
+tempmessage = '<br>' + "<b>NOTE: </b> On November 17th 2025, the City of Toronto made changes to TMMIS which made it impossible for Tabs to access TMMIS data. I've now fixed this, but it means that no notifications were sent between Nov 18 - Nov 22 2025. Sorry for the inconvenience. - Gabe." + '<br>' # string beginning and ending with <br> ,  or ''
+#tempmessage = ''
 tempfromdate = '' # 'YYYY-MM-DD' or ''
 
 lg = logging.getLogger()
@@ -31,6 +37,7 @@ lg.info("TEMPFROMDATE: "+tempfromdate)
 
 
 class TmmisSearchSpider(scrapy.Spider):
+	#handle_httpstatus_list = [400]
 
 	name = 'tmmis-search'
 	allowed_domains = ['toronto.ca']
@@ -39,6 +46,25 @@ class TmmisSearchSpider(scrapy.Spider):
 
 	def __init__(self):
 		dispatcher.connect(self.spider_closed, signals.spider_closed)
+
+	def get_csrf_tokens(self):
+		"""
+		Use curl_cffi to get CSRF tokens with browser TLS fingerprinting.
+		This bypasses the blocking that occurs with standard HTTP clients.
+		Returns a tuple of (cookies_dict, xsrf_token)
+		"""
+		session = curl_requests.Session()
+
+		# Visit main page to establish session, then get CSRF token
+		session.get('https://secure.toronto.ca/council/', impersonate="chrome120")
+		session.get('https://secure.toronto.ca/council/api/csrf.json', impersonate="chrome120").raise_for_status()
+
+		cookies_dict = dict(session.cookies)
+		xsrf_token = cookies_dict.get('XSRF-TOKEN')
+		if not xsrf_token:
+			raise Exception(f'XSRF-TOKEN not found. Available cookies: {list(cookies_dict.keys())}')
+
+		return cookies_dict, xsrf_token
 
 	def get_searchphrase(self,id):
 		#given the id of a record in the searches table, returns the associated searchphrase
@@ -63,10 +89,16 @@ class TmmisSearchSpider(scrapy.Spider):
 		else:
 			pass
 
-	def spider_closed(self, spider):
+	async def spider_closed(self, spider):
 		global sendemails
 		global tempmessage
 		global lg
+
+		global testemail
+
+		if testemail:
+			await self.send_email("gabe@pwd.ca","Tabs Toronto Test","test")
+			lg.info("@@@@@@@@@@@@@@@@@@@@@ sent email to GABE for TEST")
 
 		if self.settings.get('MYSQL_USER'):
 			conf = {
@@ -111,16 +143,17 @@ class TmmisSearchSpider(scrapy.Spider):
 					emailtext += tempmessage
 				emailtext += "<br>To permanently stop receiving notifications for this search, click here: http://pwd.ca/tabs/unsubscribe.php?e=" + quote(lastemail) + "&i=" + str(lastid)
 				if sendemails:
-					self.send_email(lastemail,"Tabs Toronto notification: "+self.get_searchphrase(lastid),emailtext)
+					await self.send_email(lastemail,"Tabs Toronto notification: "+self.get_searchphrase(lastid),emailtext)
 					lg.info("sent email to "+ lastemail + " for " + str(lastid))
 				else:
 					lg.info("_didn't_ send email to "+ lastemail + " for " + str(lastid))
-				lg.info("sent email to "+ lastemail + " for " + str(lastid))
+				lg.info("-sent email to "+ lastemail + " for " + str(lastid))
 
 				cursor2 = conn2.cursor()
 				lg.info('ABOUT TO RUN: ' + 'UPDATE notifications SET emailsent=1 WHERE id = "' + str(lastid) + '";')
-				cursor2.execute('UPDATE notifications SET emailsent=1 WHERE id = "' + str(lastid) + '";')
-				conn2.commit()
+				if updatedb:
+					cursor2.execute('UPDATE notifications SET emailsent=1 WHERE id = "' + str(lastid) + '";')
+					conn2.commit()
 
 				lg.debug("D2: "+str(row['id']))
 				#start preparing the next email
@@ -140,119 +173,217 @@ class TmmisSearchSpider(scrapy.Spider):
 				emailtext += tempmessage
 			emailtext += "<br>To permanently stop receiving notifications for this search, click here: http://pwd.ca/tabs/unsubscribe.php?e=" + quote(lastemail) + "&i=" + str(lastid)
 			if sendemails:
-				self.send_email(lastemail,"Tabs Toronto notification: "+self.get_searchphrase(lastid),emailtext)
+				await self.send_email(lastemail,"Tabs Toronto notification: "+self.get_searchphrase(lastid),emailtext)
 				lg.info("sent email to "+ lastemail + " for " + str(lastid))
 			else:
 				lg.info("_didn't_ send email to "+ lastemail + " for " + str(lastid))
 
 			cursor2 = conn2.cursor()
 			lg.info('ABOUT TO RUN: ' + 'UPDATE notifications SET emailsent=1 WHERE id = "' + str(lastid) + '";')
-			cursor2.execute('UPDATE notifications SET emailsent=1 WHERE id = "' + str(lastid) + '";')
-			conn2.commit()
+			if updatedb:
+				cursor2.execute('UPDATE notifications SET emailsent=1 WHERE id = "' + str(lastid) + '";')
+				conn2.commit()
 		lg.info("--------- finished notifications/emails")
 
-	def send_email(self,to,subject,content):
-		message = Mail(
-    		from_email='tabstoronto@pwd.ca',
-   			to_emails=to,
-    		subject=subject,
-    		html_content=content)
-		try:
-			if self.settings.get('SENDGRID_API_KEY'):	
-				sg = SendGridAPIClient(self.settings.get('SENDGRID_API_KEY'))
-			else:
-				raise Exception("sendgrid api key error")
+	async def send_email(self,to,subject,content):
+		global emailchannel
 
-			response = sg.send(message)
-		except Exception as e:
-			print(e.message)
+		if emailchannel == "sendgrid":
+			message = Mail(
+	    		from_email='tabstoronto@pwd.ca',
+	   			to_emails=to,
+	    		subject=subject,
+	    		html_content=content)
+			lg.debug(" @@ SENDGRID email starting")
+			try:
+				if self.settings.get('SENDGRID_API_KEY'):	
+					sg = SendGridAPIClient(self.settings.get('SENDGRID_API_KEY'))
+				else:
+					raise Exception("sendgrid api key error")
+	
+				response = sg.send(message)
+				lg.debug(" @@ SENDGRID email done")
+			except Exception as e:
+				print(e.message)
+		else: #we assume emailchannel = "gmail"
+			lg.info(" @@@@@ gmail")
+			mailer = MailSender(mailfrom='tabstoronto@pwd.ca',
+				smtpuser=self.settings.get('GMAIL_USERNAME'),smtphost="smtp.gmail.com", 
+				smtpport=587, smtppass=self.settings.get('GMAIL_PASSWORD'), smtptls=1)
+			lg.debug(" @@@@@ email about to send, gmail")
+			return mailer.send(to=to, subject=subject, body=content)
 
 	def start_requests(self):
-		mycookies = ""
-		#first request
-		thisurl = 'https://secure.toronto.ca/council/'
-		yield scrapy.Request(thisurl, self.parse_first_requests, dont_filter=True, meta={'cookiejar': mycookies})
+#	async def start(self):
+		#THE OLD WAY
+		#mycookies = ""
+		##first request
+		#thisurl = 'https://secure.toronto.ca/council/'
+		#yield scrapy.Request(thisurl, callback=self.parse_first_requests, errback=self.errback, dont_filter=True, meta={'cookiejar': mycookies})
+		#
+		##second request
+		#thisurl = 'https://secure.toronto.ca/council/api/csrf.json'
+		#yield scrapy.Request(thisurl, callback=self.parse_first_requests, errback=self.errback, method='GET', dont_filter=True, meta={'cookiejar': mycookies})
 
-		#second request
-		thisurl = 'https://secure.toronto.ca/council/api/csrf.json'
-		yield scrapy.Request(thisurl, self.parse_first_requests, method='GET', dont_filter=True, meta={'cookiejar': mycookies})
-
+		"""Get CSRF tokens using curl_cffi, then proceed with Scrapy requests."""
+		mycookies, xsrf_token = self.get_csrf_tokens()
+		yield scrapy.Request(
+			'https://secure.toronto.ca/council/',
+			self.parse_first_requests,
+			dont_filter=True,
+			meta={'cookies': mycookies, 'xsrf_token': xsrf_token}
+		)
 
 
 	def parse_first_requests(self, response):
 		global tempfromdate
+		global debugemaillimit
 
-		if response.url == 'https://secure.toronto.ca/council/':
-			pass
-		else:
-			mycookies = {}
-			cookieJar = response.meta.setdefault('cookie_jar', CookieJar())
-			cookieJar.extract_cookies(response, response.request)
-			for cooki in cookieJar: 
-				mycookies[cooki.name] = cooki.value
+		#THE OLD WAY
+		#if response.url == 'https://secure.toronto.ca/council/':
+		#	pass
+		#else:
+		#	mycookies = {}
+		#	cookieJar = response.meta.setdefault('cookie_jar', CookieJar())
+		#	cookieJar.extract_cookies(response, response.request)
+		#	for cooki in cookieJar: 
+		#		mycookies[cooki.name] = cooki.value
+		#
+		#	if mycookies['XSRF-TOKEN']:
+		#		pass
+		#	else:
+		#		raise Exception('XSRF value is missing')
 
-			if mycookies['XSRF-TOKEN']:
-				pass
-			else:
-				raise Exception('XSRF value is missing')
-		
-			if self.settings.get('MYSQL_USER'):
-				conf = {
-					'user': self.settings.get('MYSQL_USER'),
-					'password': self.settings.get('MYSQL_PASSWORD'),
-					'host': self.settings.get('MYSQL_HOST'),
-					'database': self.settings.get('MYSQL_DATABASE'),
-				 	'raise_on_warnings': True
-				}
-			else:
-				raise Exception('mysql config failure')	
+		# Get cookies and XSRF token from meta (set by start_requests using curl_cffi)
+		mycookies = response.meta['cookies']
+		xsrf_token = response.meta['xsrf_token']
 
-			conn = mysql.connector.connect(**conf)
-			cursor = conn.cursor()
-			cursor.execute('SELECT searchphrase,id,email FROM `searches` WHERE emailvalidated;')
-			rows = cursor.fetchall()
+			#THE OLD WAY
+			#if self.settings.get('MYSQL_USER'):
+			#	conf = {
+			#		'user': self.settings.get('MYSQL_USER'),
+			#		'password': self.settings.get('MYSQL_PASSWORD'),
+			#		'host': self.settings.get('MYSQL_HOST'),
+			#		'database': self.settings.get('MYSQL_DATABASE'),
+			#	 	'raise_on_warnings': True
+			#	}
+			#else:
+			#	raise Exception('mysql config failure')	
+			#
+			#conn = mysql.connector.connect(**conf)
+			#cursor = conn.cursor()
+			#if debugemaillimit:
+			#	cursor.execute('SELECT searchphrase,id,email FROM `searches` WHERE emailvalidated AND email="gabe@pwd.ca";')
+			#else:
+			#	cursor.execute('SELECT searchphrase,id,email FROM `searches` WHERE emailvalidated;')
+			#rows = cursor.fetchall()
+			#
+			#xsrftoken = ""
+			#body = ""
+			#headers = {
+	 		#	"Accept": "application/json, text/plain, */*", "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8", "Connection": "keep-alive", "Content-Type": "application/json", "Origin": "https://secure.toronto.ca", "Referer": "https://secure.toronto.ca/council/", "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-origin", "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36", "sec-ch-ua": "\"Not?A_Brand\";v=\"8\", \"Chromium\";v=\"108\", \"Google Chrome\";v=\"108\"", "sec-ch-ua-mobile": "?0", "sec-ch-ua-platform": "\"macOS\"",
+	    	#		"X-XSRF-TOKEN": mycookies['XSRF-TOKEN'],
+			#}
 
-			xsrftoken = ""
-			body = ""
-			headers = {
-	 			"Accept": "application/json, text/plain, */*", "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8", "Connection": "keep-alive", "Content-Type": "application/json", "Origin": "https://secure.toronto.ca", "Referer": "https://secure.toronto.ca/council/", "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-origin", "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36", "sec-ch-ua": "\"Not?A_Brand\";v=\"8\", \"Chromium\";v=\"108\", \"Google Chrome\";v=\"108\"", "sec-ch-ua-mobile": "?0", "sec-ch-ua-platform": "\"macOS\"",
-	    			"X-XSRF-TOKEN": mycookies['XSRF-TOKEN'],
+		if self.settings.get('MYSQL_USER'):
+			conf = {
+				'user': self.settings.get('MYSQL_USER'),
+				'password': self.settings.get('MYSQL_PASSWORD'),
+				'host': self.settings.get('MYSQL_HOST'),
+				'database': self.settings.get('MYSQL_DATABASE'),
+			 	'raise_on_warnings': True
 			}
+		else:
+			raise Exception('mysql config failure')	
 
-			lg.debug("ROWS: "+pformat(rows))
-			for row in rows:
-				if row:
-					if tempfromdate != '':
-						fromDate = datetime.datetime.strptime(tempfromdate,'%Y-%m-%d')
-					else:
-						fromDate = datetime.datetime.today()
-					fromDate = fromDate.replace(hour=0, minute=0, second=0, microsecond=0)
-					fromDate = fromDate.astimezone(datetime.timezone.utc)
-					lg.debug("FROMDATE: "+pformat(fromDate))
-					
-					thisurl = 'https://secure.toronto.ca/council/api/multiple/agenda-items.json?pageNumber=0&pageSize=50&sortOrder=meetingDate%20desc,referenceSort'
-					body = '{"includeTitle":true,"includeSummary":true,"includeRecommendations":true,"includeDecisions":true,"meetingFromDate":"' + fromDate.strftime("%Y-%m-%dT%H:%M:%S.%fZ") + '","meetingToDate":null,"word":"'+ row[0] +'","includeAttachments":true}'
+			#THE OLD WAY
+			#lg.debug("ROWS: "+pformat(rows))
+			#for row in rows:
+			#	if row:
+			#		if tempfromdate != '':
+			#			fromDate = datetime.datetime.strptime(tempfromdate,'%Y-%m-%d')
+			#		else:
+			#			fromDate = datetime.datetime.today()
+			#		fromDate = fromDate.replace(hour=0, minute=0, second=0, microsecond=0)
+			#		fromDate = fromDate.astimezone(datetime.timezone.utc)
+			#		#lg.debug("FROMDATE: "+pformat(fromDate))
+			#		
+			#		thisurl = 'https://secure.toronto.ca/council/api/multiple/agenda-items.json?pageNumber=0&pageSize=50&sortOrder=meetingDate%20desc,referenceSort'
+			#		body = '{"includeTitle":true,"includeSummary":true,"includeRecommendations":true,"includeDecisions":true,"decisionBodyId":null,"meetingFromDate":"' + fromDate.strftime("%Y-%m-%dT%H:%M:%S.%fZ") + '","meetingToDate":null,"word":"'+ row[0] +'","includeAttachments":true}'
+			#		#### GABE TESTING
+			#		#lg.debug("thisurl: "+thisurl+"     --- BODY:"+pformat(body));
+			#
+			#		yield scrapy.Request(thisurl, callback=self.parse, errback=self.errback, method='POST', dont_filter=True, headers=headers, body=body, cookies=mycookies, meta=dict(id=row[1],email=row[2]))
+			#
+			#cursor.close()
 
-					yield scrapy.Request(thisurl, self.parse, method='POST', dont_filter=True, headers=headers, body=body, cookies=mycookies, meta=dict(id=row[1],email=row[2]))
+		conn = mysql.connector.connect(**conf)
+		cursor = conn.cursor()
+		if debugemaillimit:
+			cursor.execute('SELECT searchphrase,id,email FROM `searches` WHERE emailvalidated AND email="gabe@pwd.ca";')
+		else:
+			cursor.execute('SELECT searchphrase,id,email FROM `searches` WHERE emailvalidated;')
+		rows = cursor.fetchall()
 
-			cursor.close()
+		# Update headers with more current Chrome version
+		headers = {
+			"Accept": "application/json, text/plain, */*",
+			"Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
+			"Connection": "keep-alive",
+			"Content-Type": "application/json",
+			"Origin": "https://secure.toronto.ca",
+			"Referer": "https://secure.toronto.ca/council/",
+			"Sec-Fetch-Dest": "empty",
+			"Sec-Fetch-Mode": "cors",
+			"Sec-Fetch-Site": "same-origin",
+			"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+			"sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+			"sec-ch-ua-mobile": "?0",
+			"sec-ch-ua-platform": '"macOS"',
+			"X-XSRF-TOKEN": xsrf_token,
+		}
 
+		lg.debug("ROWS: "+pformat(rows))
+		for row in rows:
+			if row:
+				if tempfromdate != '':
+					fromDate = datetime.datetime.strptime(tempfromdate,'%Y-%m-%d')
+				else:
+					fromDate = datetime.datetime.today()
+				fromDate = fromDate.replace(hour=0, minute=0, second=0, microsecond=0)
+				fromDate = fromDate.astimezone(datetime.timezone.utc)
+				lg.debug("FROMDATE: "+pformat(fromDate))
+
+				thisurl = 'https://secure.toronto.ca/council/api/multiple/agenda-items.json?pageNumber=0&pageSize=50&sortOrder=meetingDate%20desc,referenceSort'
+				body = '{"includeTitle":true,"includeSummary":true,"includeRecommendations":true,"includeDecisions":true,"meetingFromDate":"' + fromDate.strftime("%Y-%m-%dT%H:%M:%S.%fZ") + '","meetingToDate":null,"word":"'+ row[0] +'","includeAttachments":true}'
+
+				yield scrapy.Request(thisurl, self.parse, method='POST', dont_filter=True, headers=headers, body=body, cookies=mycookies, meta=dict(id=row[1],email=row[2]))
+
+		cursor.close()
 
 	def parse(self, response):
 		global lg
 		jsonresponse = json.loads(response.body)
 		#lg.debug("RESPONSE: "+pformat(jsonresponse))
-		for r in jsonresponse["Records"]:
-			item = AgendaItem()
-			item['meetingDate'] = datetime.datetime.utcfromtimestamp(r['meetingDate']/1000).strftime("%Y-%m-%d")
-			item['reference'] = r['reference']
-			item['agendaItemTitle'] = r['agendaItemTitle']
-			item['decisionBodyName'] = r['decisionBodyName']
-			item['search_id'] = response.meta['id']
-			item['email'] = response.meta['email']
-			lg.debug("ITEM: " + pformat(item))
-			yield item
 
+		if response.status == 200:
 
+			for r in jsonresponse["Records"]:
+				item = AgendaItem()
+				item['meetingDate'] = datetime.datetime.utcfromtimestamp(r['meetingDate']/1000).strftime("%Y-%m-%d")
+				item['reference'] = r['reference']
+				item['agendaItemTitle'] = r['agendaItemTitle']
+				item['decisionBodyName'] = r['decisionBodyName']
+				item['search_id'] = response.meta['id']
+				item['email'] = response.meta['email']
+				#lg.debug("ITEM: " + pformat(item))
+				yield item
+		else:
+			lg.debug("FAIL RESPONSE: "+pformat(jsonresponse))
+
+	def errback(self, failure):
+		global lg
+		# log all failures
+		lg.debug("FAILURE:" + pformat(failure))
 
 	
