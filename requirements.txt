@@ -10,3 +10,4 @@ cryptography==38.0.4
 python-http-client
 scrapy
 sendgrid
+requests

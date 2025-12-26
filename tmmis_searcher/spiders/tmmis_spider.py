@@ -6,6 +6,8 @@ import mysql.connector
 import os
 import logging
 import json
+import requests
+#import resend
 from mysql.connector.constants import ClientFlag
 from tmmis_searcher.items import AgendaItem
 from scrapy import signals
@@ -18,51 +20,52 @@ from pprint import pformat
 from scrapy.http.cookies import CookieJar
 from datetime import tzinfo
 from curl_cffi import requests as curl_requests
+from scrapy.utils.versions import scrapy_components_versions
 
-testemail = 0 ########
-sendemails = 1
-updatedb = 1
-debugemaillimit = 0 ## this makes it so it only processes searches created by gabe@pwd.ca
-emailchannel = 'sendgrid'
-tempmessage = '<br>' + "<b>NOTE: </b> On November 17th 2025, the City of Toronto made changes to TMMIS which made it impossible for Tabs to access TMMIS data. I've now fixed this, but it means that no notifications were sent between Nov 18 - Nov 22 2025. Sorry for the inconvenience. - Gabe." + '<br>' # string beginning and ending with <br> ,  or ''
-#tempmessage = ''
+testemail = 0 #normally 0
+sendemails = 1 #normally 1
+updatedb = 1 #normally 1
+debugemaillimit = 1 ## this makes it so it only processes searches created by gabe@pwd.ca
+emailchannel = 'resend'
+#tempmessage = '<br>' + "<b>NOTE: </b> On November 17th 2025, the City of Toronto made changes to TMMIS which made it impossible for Tabs to access TMMIS data. I've now fixed this, but it means that no notifications were sent between Nov 18 - Nov 22 2025. Sorry for the inconvenience. - Gabe." + '<br>' # string beginning and ending with <br> ,  or ''
+tempmessage = ''
 tempfromdate = '' # 'YYYY-MM-DD' or ''
+
+slackts = ''
+resenddailyquotaremaining = "undefined"
+
+proxy = ""
 
 lg = logging.getLogger()
 logging.basicConfig()
 logging.getLogger().setLevel(logging.DEBUG)
+#logging.getLogger().setLevel(logging.INFO)
 lg.info("SENDEMAILS: "+str(sendemails))
 lg.info("TEMPMESSAGE: "+tempmessage)
 lg.info("TEMPFROMDATE: "+tempfromdate)
 
 
 class TmmisSearchSpider(scrapy.Spider):
-	#handle_httpstatus_list = [400]
-
 	name = 'tmmis-search'
 	allowed_domains = ['toronto.ca']
+	download_delay = 1.5
 	conf = { }
-
 
 	def __init__(self):
 		dispatcher.connect(self.spider_closed, signals.spider_closed)
 
 	def get_csrf_tokens(self):
-		"""
-		Use curl_cffi to get CSRF tokens with browser TLS fingerprinting.
-		This bypasses the blocking that occurs with standard HTTP clients.
-		Returns a tuple of (cookies_dict, xsrf_token)
-		"""
-		session = curl_requests.Session()
+		global proxy
 
-		# Visit main page to establish session, then get CSRF token
-		session.get('https://secure.toronto.ca/council/', impersonate="chrome120")
-		session.get('https://secure.toronto.ca/council/api/csrf.json', impersonate="chrome120").raise_for_status()
+		session = curl_requests.Session()
+		session.get('https://secure.toronto.ca/council/', impersonate="chrome120", proxy=proxy)
+		session.get('https://secure.toronto.ca/council/api/csrf.json', impersonate="chrome120", proxy=proxy).raise_for_status()
 
 		cookies_dict = dict(session.cookies)
 		xsrf_token = cookies_dict.get('XSRF-TOKEN')
 		if not xsrf_token:
-			raise Exception(f'XSRF-TOKEN not found. Available cookies: {list(cookies_dict.keys())}')
+			lg.error(f'XSRF-TOKEN not found. Available cookies: {list(cookies_dict.keys())}')
+			#raise Exception(f'XSRF-TOKEN not found. Available cookies: {list(cookies_dict.keys())}')
 
 		return cookies_dict, xsrf_token
 
@@ -77,7 +80,8 @@ class TmmisSearchSpider(scrapy.Spider):
 			 	'raise_on_warnings': True
 			}
 		else:
-			raise Exception('mysql config failure')	
+			lg.error('mysql config failure')
+			#raise Exception('mysql config failure')
 
 		conn = mysql.connector.connect(**conf)
 		cursor = conn.cursor()
@@ -94,11 +98,8 @@ class TmmisSearchSpider(scrapy.Spider):
 		global tempmessage
 		global lg
 
-		global testemail
-
-		if testemail:
-			await self.send_email("gabe@pwd.ca","Tabs Toronto Test","test")
-			lg.info("@@@@@@@@@@@@@@@@@@@@@ sent email to GABE for TEST")
+		global slackts
+		global resenddailyquotaremaining
 
 		if self.settings.get('MYSQL_USER'):
 			conf = {
@@ -147,7 +148,6 @@ class TmmisSearchSpider(scrapy.Spider):
 					lg.info("sent email to "+ lastemail + " for " + str(lastid))
 				else:
 					lg.info("_didn't_ send email to "+ lastemail + " for " + str(lastid))
-				lg.info("-sent email to "+ lastemail + " for " + str(lastid))
 
 				cursor2 = conn2.cursor()
 				lg.info('ABOUT TO RUN: ' + 'UPDATE notifications SET emailsent=1 WHERE id = "' + str(lastid) + '";')
@@ -184,9 +184,41 @@ class TmmisSearchSpider(scrapy.Spider):
 				cursor2.execute('UPDATE notifications SET emailsent=1 WHERE id = "' + str(lastid) + '";')
 				conn2.commit()
 		lg.info("--------- finished notifications/emails")
+		slackmsg = "done\n"
+		slackresp = requests.post("https://slack.com/api/chat.postMessage",json={"thread_ts": slackts,"channel":"C0A5AKWV682","text": slackmsg}, headers={"Authorization": "Bearer "+self.settings.get('SLACK_TOKEN'),"Content-type": "application/json; charset=utf-8"})
+
+		#post email stats to Slack
+		if emailchannel == "sendgrid":
+			sg = SendGridAPIClient(self.settings.get('SENDGRID_API_KEY'))
+			sgresponse = sg.client.stats.get(query_params={"start_date": datetime.datetime.today().strftime('%Y-%m-%d')})
+			sgstatsjson = json.loads(sgresponse.body)
+			slackmsg = "Sendgrid stats (today): requests: " + pformat(sgresponse) + "\n"
+			try:
+				if sgstatsjson[0]["date"] == datetime.datetime.today().strftime('%Y-%m-%d'):
+					slackmsg = "Sendgrid stats (today): Requests: " + str(sgstatsjson[0]["stats"][0]["metrics"]["requests"]) + " / delivered: " + str(sgstatsjson[0]["stats"][0]["metrics"]["delivered"]) 
+				else: 
+					slackmsg = "error (A) parsing sendgrid stats response"
+			except: 
+				slackmsg = "error (B) parsing sendgrid stats response"
+			slackresp = requests.post("https://slack.com/api/chat.postMessage",json={"thread_ts": slackts,"channel":"C0A5AKWV682","text": slackmsg}, headers={"Authorization": "Bearer "+self.settings.get('SLACK_TOKEN'),"Content-type": "application/json; charset=utf-8"})
+			lg.info(slackmsg)
+		elif emailchannel == "resend":
+			try:
+				if int(resenddailyquotaremaining) < 2:
+					slackmsg = "@gabe resend daily quota almost exhausted (" + resenddailyquotaremaining + ")"
+					slackresp = requests.post("https://slack.com/api/chat.postMessage",json={"thread_ts": slackts,"channel":"C0A5AKWV682","text": slackmsg}, headers={"Authorization": "Bearer "+self.settings.get('SLACK_TOKEN'),"Content-type": "application/json; charset=utf-8"})		
+			except (TypeError, ValueError):
+				pass
+			slackmsg = "resend daily quota remaining: " + str(resenddailyquotaremaining)
+			slackresp = requests.post("https://slack.com/api/chat.postMessage",json={"thread_ts": slackts,"channel":"C0A5AKWV682","text": slackmsg}, headers={"Authorization": "Bearer "+self.settings.get('SLACK_TOKEN'),"Content-type": "application/json; charset=utf-8"})
+			lg.info(slackmsg)
+		else:
+			pass
+			##################################################
 
 	async def send_email(self,to,subject,content):
 		global emailchannel
+		global resenddailyquotaremaining
 
 		if emailchannel == "sendgrid":
 			message = Mail(
@@ -205,8 +237,23 @@ class TmmisSearchSpider(scrapy.Spider):
 				lg.debug(" @@ SENDGRID email done")
 			except Exception as e:
 				print(e.message)
+		elif emailchannel == "resend-sdk":
+			resend.api_key = self.settings.get('RESEND_API_KEY')
+			params: resend.Emails.SendParams = {
+			    "from": 'tabstoronto@pwd.ca',
+			    "to": to,
+			    "subject": subject,
+			    "html": content,
+			}
+
+			email = resend.Emails.send(params)
+		elif emailchannel == "resend":
+			resendresp = requests.post("https://api.resend.com/emails",json={"from":'tabstoronto@pwd.ca',"to": to, "subject": subject, "html": content}, headers={"Authorization": "Bearer "+self.settings.get('RESEND_API_KEY'),"Content-type": "application/json"})
+			if isinstance(resendresp.headers['x-resend-daily-quota'], int):
+				resenddailyquotaremaining = 100 - int(resendresp.headers['x-resend-daily-quota'])
+
 		else: #we assume emailchannel = "gmail"
-			lg.info(" @@@@@ gmail")
+			lg.debug(" @@@@@ gmail")
 			mailer = MailSender(mailfrom='tabstoronto@pwd.ca',
 				smtpuser=self.settings.get('GMAIL_USERNAME'),smtphost="smtp.gmail.com", 
 				smtpport=587, smtppass=self.settings.get('GMAIL_PASSWORD'), smtptls=1)
@@ -214,24 +261,61 @@ class TmmisSearchSpider(scrapy.Spider):
 			return mailer.send(to=to, subject=subject, body=content)
 
 	def start_requests(self):
-#	async def start(self):
-		#THE OLD WAY
-		#mycookies = ""
-		##first request
-		#thisurl = 'https://secure.toronto.ca/council/'
-		#yield scrapy.Request(thisurl, callback=self.parse_first_requests, errback=self.errback, dont_filter=True, meta={'cookiejar': mycookies})
-		#
-		##second request
-		#thisurl = 'https://secure.toronto.ca/council/api/csrf.json'
-		#yield scrapy.Request(thisurl, callback=self.parse_first_requests, errback=self.errback, method='GET', dont_filter=True, meta={'cookiejar': mycookies})
+		global slackts
+		global proxy
+		global testemail
+		global resenddailyquotaremaining
 
-		"""Get CSRF tokens using curl_cffi, then proceed with Scrapy requests."""
+		PROXIES = self.settings.get('PROXIES')
+		#set proxy to PROXIES[0] (or "") for no proxy
+		#proxy = PROXIES[random.randint(1, len(PROXIES)-1)]
+		proxy = PROXIES[1+ (datetime.datetime.now().microsecond % 2)] #"randomly" picks 1 or 2
+
+		slackmsg = "Run start: "
+		for name, version in scrapy_components_versions():
+			if name == "Platform":
+				slackmsg += version
+		proxy_display = ""
+		_,_,proxy_display = proxy.partition("@")
+		slackmsg += " / Proxy " + proxy_display
+		slackresp = requests.post("https://slack.com/api/chat.postMessage",json={"channel":"C0A5AKWV682","text": slackmsg}, headers={"Authorization": "Bearer "+self.settings.get('SLACK_TOKEN'),"Content-type": "application/json; charset=utf-8"})
+		lg.info(slackmsg)
+		try:
+			slackdata = slackresp.json()
+		except requests.JSONDecodeError:
+			#error
+			lg.error("json decode error")
+		slackts = slackdata['ts']
+
 		mycookies, xsrf_token = self.get_csrf_tokens()
+
+		if testemail:
+			if emailchannel == "resend-sdk":
+				try:
+					resend.api_key = self.settings.get('RESEND_API_KEY')
+					params: resend.Emails.SendParams = {
+					    "from": 'tabstoronto@pwd.ca',
+					    "to": "gabe@pwd.ca",
+					    "subject": "Tabs Toronto Test",
+					    "html": "test",
+					}
+
+					email = resend.Emails.send(params)
+				except resend.exceptions.ResendError:
+					lg.info("@@@@@@@@@@@@@@@@@@@@@ email test failed, resenderror")
+				else:
+					lg.info("@@@@@@@@@@@@@@@@@@@@@ sent email to GABE for TEST")
+					lg.info("resend result: "+pformat(email))
+			elif emailchannel == "resend":
+				resendresp = requests.post("https://api.resend.com/emails",json={"from":'tabstoronto@pwd.ca',"to": "gabe@pwd.ca", "subject": "Tabs Toronto Test", "html": "test"}, headers={"Authorization": "Bearer "+self.settings.get('RESEND_API_KEY'),"Content-type": "application/json"})
+				resenddailyquotaremaining = 100 - int(resendresp.headers['x-resend-daily-quota'])
+			#os._exit(0)
+
 		yield scrapy.Request(
 			'https://secure.toronto.ca/council/',
 			self.parse_first_requests,
 			dont_filter=True,
-			meta={'cookies': mycookies, 'xsrf_token': xsrf_token}
+			meta={'cookies': mycookies, 'xsrf_token': xsrf_token, "proxy": proxy, "slackts": slackdata['ts'] }
 		)
 
 
@@ -239,51 +323,11 @@ class TmmisSearchSpider(scrapy.Spider):
 		global tempfromdate
 		global debugemaillimit
 
-		#THE OLD WAY
-		#if response.url == 'https://secure.toronto.ca/council/':
-		#	pass
-		#else:
-		#	mycookies = {}
-		#	cookieJar = response.meta.setdefault('cookie_jar', CookieJar())
-		#	cookieJar.extract_cookies(response, response.request)
-		#	for cooki in cookieJar: 
-		#		mycookies[cooki.name] = cooki.value
-		#
-		#	if mycookies['XSRF-TOKEN']:
-		#		pass
-		#	else:
-		#		raise Exception('XSRF value is missing')
-
 		# Get cookies and XSRF token from meta (set by start_requests using curl_cffi)
 		mycookies = response.meta['cookies']
 		xsrf_token = response.meta['xsrf_token']
 
-			#THE OLD WAY
-			#if self.settings.get('MYSQL_USER'):
-			#	conf = {
-			#		'user': self.settings.get('MYSQL_USER'),
-			#		'password': self.settings.get('MYSQL_PASSWORD'),
-			#		'host': self.settings.get('MYSQL_HOST'),
-			#		'database': self.settings.get('MYSQL_DATABASE'),
-			#	 	'raise_on_warnings': True
-			#	}
-			#else:
-			#	raise Exception('mysql config failure')	
-			#
-			#conn = mysql.connector.connect(**conf)
-			#cursor = conn.cursor()
-			#if debugemaillimit:
-			#	cursor.execute('SELECT searchphrase,id,email FROM `searches` WHERE emailvalidated AND email="gabe@pwd.ca";')
-			#else:
-			#	cursor.execute('SELECT searchphrase,id,email FROM `searches` WHERE emailvalidated;')
-			#rows = cursor.fetchall()
-			#
-			#xsrftoken = ""
-			#body = ""
-			#headers = {
-	 		#	"Accept": "application/json, text/plain, */*", "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8", "Connection": "keep-alive", "Content-Type": "application/json", "Origin": "https://secure.toronto.ca", "Referer": "https://secure.toronto.ca/council/", "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-origin", "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36", "sec-ch-ua": "\"Not?A_Brand\";v=\"8\", \"Chromium\";v=\"108\", \"Google Chrome\";v=\"108\"", "sec-ch-ua-mobile": "?0", "sec-ch-ua-platform": "\"macOS\"",
-	    	#		"X-XSRF-TOKEN": mycookies['XSRF-TOKEN'],
-			#}
+		#lg.debug("@@@ xsrf_token:" + xsrf_token)
 
 		if self.settings.get('MYSQL_USER'):
 			conf = {
@@ -296,27 +340,6 @@ class TmmisSearchSpider(scrapy.Spider):
 		else:
 			raise Exception('mysql config failure')	
 
-			#THE OLD WAY
-			#lg.debug("ROWS: "+pformat(rows))
-			#for row in rows:
-			#	if row:
-			#		if tempfromdate != '':
-			#			fromDate = datetime.datetime.strptime(tempfromdate,'%Y-%m-%d')
-			#		else:
-			#			fromDate = datetime.datetime.today()
-			#		fromDate = fromDate.replace(hour=0, minute=0, second=0, microsecond=0)
-			#		fromDate = fromDate.astimezone(datetime.timezone.utc)
-			#		#lg.debug("FROMDATE: "+pformat(fromDate))
-			#		
-			#		thisurl = 'https://secure.toronto.ca/council/api/multiple/agenda-items.json?pageNumber=0&pageSize=50&sortOrder=meetingDate%20desc,referenceSort'
-			#		body = '{"includeTitle":true,"includeSummary":true,"includeRecommendations":true,"includeDecisions":true,"decisionBodyId":null,"meetingFromDate":"' + fromDate.strftime("%Y-%m-%dT%H:%M:%S.%fZ") + '","meetingToDate":null,"word":"'+ row[0] +'","includeAttachments":true}'
-			#		#### GABE TESTING
-			#		#lg.debug("thisurl: "+thisurl+"     --- BODY:"+pformat(body));
-			#
-			#		yield scrapy.Request(thisurl, callback=self.parse, errback=self.errback, method='POST', dont_filter=True, headers=headers, body=body, cookies=mycookies, meta=dict(id=row[1],email=row[2]))
-			#
-			#cursor.close()
-
 		conn = mysql.connector.connect(**conf)
 		cursor = conn.cursor()
 		if debugemaillimit:
@@ -325,22 +348,20 @@ class TmmisSearchSpider(scrapy.Spider):
 			cursor.execute('SELECT searchphrase,id,email FROM `searches` WHERE emailvalidated;')
 		rows = cursor.fetchall()
 
-		# Update headers with more current Chrome version
 		headers = {
 			"Accept": "application/json, text/plain, */*",
-			"Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
+			"Accept-Language": "en-CA,en;q=0.9",
 			"Connection": "keep-alive",
 			"Content-Type": "application/json",
 			"Origin": "https://secure.toronto.ca",
-			"Referer": "https://secure.toronto.ca/council/",
-			"Sec-Fetch-Dest": "empty",
-			"Sec-Fetch-Mode": "cors",
-			"Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Dest": "document",
+			"Sec-Fetch-Mode": "navigate",
+			"Sec-Fetch-Site": "none",
+			"Sec-Fetch-User": "?1",
 			"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-			"sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+			"X-XSRF-TOKEN": xsrf_token,
 			"sec-ch-ua-mobile": "?0",
 			"sec-ch-ua-platform": '"macOS"',
-			"X-XSRF-TOKEN": xsrf_token,
 		}
 
 		lg.debug("ROWS: "+pformat(rows))
@@ -352,22 +373,37 @@ class TmmisSearchSpider(scrapy.Spider):
 					fromDate = datetime.datetime.today()
 				fromDate = fromDate.replace(hour=0, minute=0, second=0, microsecond=0)
 				fromDate = fromDate.astimezone(datetime.timezone.utc)
-				lg.debug("FROMDATE: "+pformat(fromDate))
+				#lg.debug("FROMDATE: "+pformat(fromDate))
 
 				thisurl = 'https://secure.toronto.ca/council/api/multiple/agenda-items.json?pageNumber=0&pageSize=50&sortOrder=meetingDate%20desc,referenceSort'
-				body = '{"includeTitle":true,"includeSummary":true,"includeRecommendations":true,"includeDecisions":true,"meetingFromDate":"' + fromDate.strftime("%Y-%m-%dT%H:%M:%S.%fZ") + '","meetingToDate":null,"word":"'+ row[0] +'","includeAttachments":true}'
+				body = '{"includeTitle":true,"includeSummary":true,"includeRecommendations":true,"includeDecisions":true,"meetingFromDate":"' + fromDate.strftime("%Y-%m-%dT%H:%M:%S.%fZ") + '","meetingToDate":null,"word":"'+ row[0].replace('"','\\"') +'","includeAttachments":true}'
 
-				yield scrapy.Request(thisurl, self.parse, method='POST', dont_filter=True, headers=headers, body=body, cookies=mycookies, meta=dict(id=row[1],email=row[2]))
+				yield scrapy.Request(thisurl, self.parse, method='POST', dont_filter=True, headers=headers, body=body, cookies=mycookies, meta=dict(id=row[1],email=row[2],slackts=response.meta['slackts']))
 
 		cursor.close()
 
 	def parse(self, response):
 		global lg
-		jsonresponse = json.loads(response.body)
-		#lg.debug("RESPONSE: "+pformat(jsonresponse))
 
-		if response.status == 200:
+		if response.status != 200:
+			#do debug output and die.
+			lg.error("@@@RESPONSE: "+str(response.status))
+			lg.error("BODY:"+pformat(response.body))
+			lg.error("REQ-HEADERS:"+pformat(response.request.headers))
+			lg.error("REQ-COOKIES:"+pformat(response.request.cookies))
+			lg.error("REQ-BODY:"+pformat(response.request.body))
+			
+			slackmessage = "UNEXPECTED RESPONSE\n" + "RESPONSE: "+str(response.status) + \
+				"BODY:"+pformat(response.body) + "\n" + \
+				"REQ-HEADERS:"+pformat(response.request.headers) + "\n" + \
+				"REQ-COOKIES:"+pformat(response.request.cookies) + "\n" + \
+				"REQ-BODY:"+pformat(response.request.body) + "\n"
 
+			#send Slack notification
+			slackresp = requests.post("https://slack.com/api/chat.postMessage",json={"thread_ts": response.meta['slackts'],"channel":"C0A5AKWV682","text": slackmessage}, headers={"Authorization": "Bearer "+self.settings.get('SLACK_TOKEN'),"Content-type": "application/json; charset=utf-8"})
+
+		else: #RESPONSE LOOKS GOOD
+			jsonresponse = json.loads(response.body)
 			for r in jsonresponse["Records"]:
 				item = AgendaItem()
 				item['meetingDate'] = datetime.datetime.utcfromtimestamp(r['meetingDate']/1000).strftime("%Y-%m-%d")
@@ -377,9 +413,12 @@ class TmmisSearchSpider(scrapy.Spider):
 				item['search_id'] = response.meta['id']
 				item['email'] = response.meta['email']
 				#lg.debug("ITEM: " + pformat(item))
+
+				slackmessage = "hit: "+str(response.meta['id'])+"\n"
+				#send Slack notification
+				slackresp = requests.post("https://slack.com/api/chat.postMessage",json={"thread_ts": response.meta['slackts'],"channel":"C0A5AKWV682","text": slackmessage}, headers={"Authorization": "Bearer "+self.settings.get('SLACK_TOKEN'),"Content-type": "application/json; charset=utf-8"})
+
 				yield item
-		else:
-			lg.debug("FAIL RESPONSE: "+pformat(jsonresponse))
 
 	def errback(self, failure):
 		global lg
