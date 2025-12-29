@@ -7,7 +7,8 @@ import os
 import logging
 import json
 import requests
-#import resend
+#import resend #no longer using resend sdk, just direct requests
+#import mailtrap as mt as above
 from mysql.connector.constants import ClientFlag
 from tmmis_searcher.items import AgendaItem
 from scrapy import signals
@@ -25,8 +26,8 @@ from scrapy.utils.versions import scrapy_components_versions
 testemail = 0 #normally 0
 sendemails = 1 #normally 1
 updatedb = 1 #normally 1
-debugemaillimit = 1 ## this makes it so it only processes searches created by gabe@pwd.ca
-emailchannel = 'resend'
+debugemaillimit = 0 ## normally 0; if 1, it only processes searches created by gabe@pwd.ca
+emailchannel = 'resend' # sendgrid, resend, mailtrap, gmail
 #tempmessage = '<br>' + "<b>NOTE: </b> On November 17th 2025, the City of Toronto made changes to TMMIS which made it impossible for Tabs to access TMMIS data. I've now fixed this, but it means that no notifications were sent between Nov 18 - Nov 22 2025. Sorry for the inconvenience. - Gabe." + '<br>' # string beginning and ending with <br> ,  or ''
 tempmessage = ''
 tempfromdate = '' # 'YYYY-MM-DD' or ''
@@ -212,8 +213,16 @@ class TmmisSearchSpider(scrapy.Spider):
 			slackmsg = "resend daily quota remaining: " + str(resenddailyquotaremaining)
 			slackresp = requests.post("https://slack.com/api/chat.postMessage",json={"thread_ts": slackts,"channel":"C0A5AKWV682","text": slackmsg}, headers={"Authorization": "Bearer "+self.settings.get('SLACK_TOKEN'),"Content-type": "application/json; charset=utf-8"})
 			lg.info(slackmsg)
-		else:
-			pass
+		elif emailchannel == "mailtrap":
+			mtresp = requests.get("https://mailtrap.io/api/accounts/2566853/stats?start_date="+datetime.datetime.today().strftime('%Y-%m-%d')+"&end_date="+datetime.datetime.today().strftime('%Y-%m-%d'), headers={"Accept": "application/json","Api-Token": self.settings.get('MAILTRAP_API_KEY')})
+			slackmsg = "mailtrap daily quota remaining: " + str(150-int(mtresp.json()["delivery_count"]))
+			slackresp = requests.post("https://slack.com/api/chat.postMessage",json={"thread_ts": slackts,"channel":"C0A5AKWV682","text": slackmsg}, headers={"Authorization": "Bearer "+self.settings.get('SLACK_TOKEN'),"Content-type": "application/json; charset=utf-8"})
+			lg.info(slackmsg)
+		else: # we assume gmail
+			slackmsg = "emails sent thru gmail smtp, no stats available"
+			slackresp = requests.post("https://slack.com/api/chat.postMessage",json={"thread_ts": slackts,"channel":"C0A5AKWV682","text": slackmsg}, headers={"Authorization": "Bearer "+self.settings.get('SLACK_TOKEN'),"Content-type": "application/json; charset=utf-8"})
+			lg.info(slackmsg)
+
 			##################################################
 
 	async def send_email(self,to,subject,content):
@@ -251,6 +260,9 @@ class TmmisSearchSpider(scrapy.Spider):
 			resendresp = requests.post("https://api.resend.com/emails",json={"from":'tabstoronto@pwd.ca',"to": to, "subject": subject, "html": content}, headers={"Authorization": "Bearer "+self.settings.get('RESEND_API_KEY'),"Content-type": "application/json"})
 			if isinstance(resendresp.headers['x-resend-daily-quota'], int):
 				resenddailyquotaremaining = 100 - int(resendresp.headers['x-resend-daily-quota'])
+
+		elif emailchannel == "mailtrap":
+			mtresp = requests.post("https://send.api.mailtrap.io/api/send", json={"from": {"email": "tabstoronto@pwd.ca", "name": "Tabs Toronto"}, "to": [{"email": to}], "subject": subject, "text": content}, headers={"Content-Type": "application/json","Accept": "application/json","Api-Token": self.settings.get('MAILTRAP_API_KEY')})
 
 		else: #we assume emailchannel = "gmail"
 			lg.debug(" @@@@@ gmail")
@@ -290,25 +302,23 @@ class TmmisSearchSpider(scrapy.Spider):
 		mycookies, xsrf_token = self.get_csrf_tokens()
 
 		if testemail:
-			if emailchannel == "resend-sdk":
-				try:
-					resend.api_key = self.settings.get('RESEND_API_KEY')
-					params: resend.Emails.SendParams = {
-					    "from": 'tabstoronto@pwd.ca',
-					    "to": "gabe@pwd.ca",
-					    "subject": "Tabs Toronto Test",
-					    "html": "test",
-					}
-
-					email = resend.Emails.send(params)
-				except resend.exceptions.ResendError:
-					lg.info("@@@@@@@@@@@@@@@@@@@@@ email test failed, resenderror")
-				else:
-					lg.info("@@@@@@@@@@@@@@@@@@@@@ sent email to GABE for TEST")
-					lg.info("resend result: "+pformat(email))
-			elif emailchannel == "resend":
+			if emailchannel == "resend":
 				resendresp = requests.post("https://api.resend.com/emails",json={"from":'tabstoronto@pwd.ca',"to": "gabe@pwd.ca", "subject": "Tabs Toronto Test", "html": "test"}, headers={"Authorization": "Bearer "+self.settings.get('RESEND_API_KEY'),"Content-type": "application/json"})
 				resenddailyquotaremaining = 100 - int(resendresp.headers['x-resend-daily-quota'])
+			elif emailchannel == "mailtrap":
+				mtresp = requests.post("https://send.api.mailtrap.io/api/send", json={"from": {"email": "tabstoronto@pwd.ca", "name": "Tabs Toronto"}, "to": [{"email": "gabe@pwd.ca"}], "subject": "Tabs Toronto Test", "text": "test"}, headers={"Content-Type": "application/json","Accept": "application/json","Api-Token": self.settings.get('MAILTRAP_API_KEY')})
+			elif emailchannel == "gmail":
+				lg.debug(" @@@@@ gmail")
+				mailer = MailSender(mailfrom='tabstoronto@pwd.ca',
+					smtpuser=self.settings.get('GMAIL_USERNAME'),smtphost="smtp.gmail.com", 
+					smtpport=587, smtppass=self.settings.get('GMAIL_PASSWORD'), smtptls=1)
+				lg.debug(" @@@@@ email about to send, gmail")
+				to = "gabe@pwd.ca"
+				subject = "Tabs Toronto Test"
+				content = "test"
+				mailer.send(to=to, subject=subject, body=content)
+
+
 			#os._exit(0)
 
 		yield scrapy.Request(
