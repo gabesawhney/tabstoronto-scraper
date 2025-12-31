@@ -23,7 +23,7 @@ from datetime import tzinfo
 from curl_cffi import requests as curl_requests
 from scrapy.utils.versions import scrapy_components_versions
 
-testemail = 0 #normally 0
+testemail = 1 #normally 0
 sendemails = 1 #normally 1
 updatedb = 1 #normally 1
 debugemaillimit = 0 ## normally 0; if 1, it only processes searches created by gabe@pwd.ca
@@ -246,24 +246,14 @@ class TmmisSearchSpider(scrapy.Spider):
 				lg.debug(" @@ SENDGRID email done")
 			except Exception as e:
 				print(e.message)
-		elif emailchannel == "resend-sdk":
-			resend.api_key = self.settings.get('RESEND_API_KEY')
-			params: resend.Emails.SendParams = {
-			    "from": 'tabstoronto@pwd.ca',
-			    "to": to,
-			    "subject": subject,
-			    "html": content,
-			}
-
-			email = resend.Emails.send(params)
 		elif emailchannel == "resend":
 			resendresp = requests.post("https://api.resend.com/emails",json={"from":'tabstoronto@pwd.ca',"to": to, "subject": subject, "html": content}, headers={"Authorization": "Bearer "+self.settings.get('RESEND_API_KEY'),"Content-type": "application/json"})
 			if isinstance(resendresp.headers['x-resend-daily-quota'], int):
 				resenddailyquotaremaining = 100 - int(resendresp.headers['x-resend-daily-quota'])
-
+			lg.info("resend email sent: "+to)
 		elif emailchannel == "mailtrap":
 			mtresp = requests.post("https://send.api.mailtrap.io/api/send", json={"from": {"email": "tabstoronto@pwd.ca", "name": "Tabs Toronto"}, "to": [{"email": to}], "subject": subject, "text": content}, headers={"Content-Type": "application/json","Accept": "application/json","Api-Token": self.settings.get('MAILTRAP_API_KEY')})
-
+			lg.info("mailtrap email sent: "+to)
 		else: #we assume emailchannel = "gmail"
 			lg.debug(" @@@@@ gmail")
 			mailer = MailSender(mailfrom='tabstoronto@pwd.ca',
@@ -317,8 +307,8 @@ class TmmisSearchSpider(scrapy.Spider):
 				subject = "Tabs Toronto Test"
 				content = "test"
 				mailer.send(to=to, subject=subject, body=content)
-
-
+			slackmsg = "Sent test email"
+			slackresp = requests.post("https://slack.com/api/chat.postMessage",json={"channel":"C0A5AKWV682","text": slackmsg}, headers={"Authorization": "Bearer "+self.settings.get('SLACK_TOKEN'),"Content-type": "application/json; charset=utf-8"})
 			#os._exit(0)
 
 		yield scrapy.Request(
@@ -425,7 +415,6 @@ class TmmisSearchSpider(scrapy.Spider):
 				#lg.debug("ITEM: " + pformat(item))
 
 				slackmessage = "hit: "+str(response.meta['id'])+"\n"
-				#send Slack notification
 				slackresp = requests.post("https://slack.com/api/chat.postMessage",json={"thread_ts": response.meta['slackts'],"channel":"C0A5AKWV682","text": slackmessage}, headers={"Authorization": "Bearer "+self.settings.get('SLACK_TOKEN'),"Content-type": "application/json; charset=utf-8"})
 
 				yield item
